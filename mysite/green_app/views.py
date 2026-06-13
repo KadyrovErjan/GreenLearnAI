@@ -16,19 +16,23 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import (
     UserProfile, ChildProfile, MissionCategory, Mission,
-    MissionSubmission, Achievement, ChildAchievement, AIChatMessage
+    MissionSubmission, Achievement, ChildAchievement, AIChatMessage,
+    Reward, RewardRedemption, VoiceDiaryEntry, Certificate
 )
 from .permissions import IsParent, IsAdminUser, IsParentOfChild, IsParentOfSubmission
 from .serializers import (
     UserProfileSerializer, RegisterSerializer, ChildProfileSerializer,
     MissionCategorySerializer, MissionSerializer, MissionSubmissionSerializer,
     AchievementSerializer, ChildAchievementSerializer, AIChatMessageSerializer,
-    ChildStatsSerializer, FamilyStatsSerializer
+    ChildStatsSerializer, FamilyStatsSerializer,
+    RewardSerializer, RewardRedemptionSerializer,
+    VoiceDiaryEntrySerializer, CertificateSerializer
 )
 from .services.gamification import award_points, update_streak, unlock_achievements
 from .services.missions import can_submit_today, get_recommended_missions
-from .services.ai_chat import chat_with_ai
+from .services.ai_chat import chat_with_ai, analyze_diary_entry, get_persona
 from .services.ai_vision import check_mission_photo
+from .services.certificates import check_and_issue_certificates
 
 logger = logging.getLogger('green_app')
 
@@ -298,30 +302,231 @@ class AIChatView(APIView):
         if not user_message:
             return Response({'detail': 'Сообщение не может быть пустым.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        child_id = request.data.get('child_id')
-        child = None
-        if child_id:
-            try:
-                child = ChildProfile.objects.get(id=child_id, parent=request.user)
-            except ChildProfile.DoesNotExist:
-                pass
-
-        history = list(
-            AIChatMessage.objects.filter(parent=request.user)
-            .order_by('-created_at')[:20]
-        )
-        history = list(reversed(history))
-
-        ai_response = chat_with_ai(user_message, history, child=child)
-
-        AIChatMessage.objects.create(
-            parent=request.user, child=child, role='user', message=user_message
-        )
-        AIChatMessage.objects.create(
-            parent=request.user, child=child, role='assistant', message=ai_response
-        )
-
+        ai_response = _process_chat_message(request, user_message)
         return Response({'response': ai_response})
+
+
+def _process_chat_message(request, user_message: str) -> str:
+    """Общая логика чата: контекст ребёнка, режим, история, сохранение сообщений."""
+    mode = request.data.get('mode', 'assistant')
+    if mode not in ('assistant', 'psychologist'):
+        mode = 'assistant'
+
+    child_id = request.data.get('child_id')
+    child = None
+    if child_id:
+        try:
+            child = ChildProfile.objects.get(id=child_id, parent=request.user)
+        except ChildProfile.DoesNotExist:
+            pass
+
+    history = list(
+        AIChatMessage.objects.filter(parent=request.user)
+        .order_by('-created_at')[:20]
+    )
+    history = list(reversed(history))
+
+    ai_response = chat_with_ai(user_message, history, child=child, mode=mode)
+
+    AIChatMessage.objects.create(
+        parent=request.user, child=child, role='user', message=user_message
+    )
+    AIChatMessage.objects.create(
+        parent=request.user, child=child, role='assistant', message=ai_response
+    )
+    return ai_response
+
+
+class AIVoiceChatView(APIView):
+    """
+    Голосовой чат: принимает распознанный текст (transcript) после
+    Web Speech API на фронтенде. Возвращает {'text': ответ ИИ, 'transcript': текст пользователя}.
+    """
+    permission_classes = [IsParent]
+
+    def post(self, request):
+        transcript = (request.data.get('transcript') or request.data.get('message') or '').strip()
+        if not transcript:
+            return Response(
+                {'detail': 'Не удалось распознать речь. Попробуйте ещё раз.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ai_response = _process_chat_message(request, transcript)
+        return Response({'text': ai_response, 'transcript': transcript})
+
+
+# ──────────────────────────────────────────────
+# Магазин наград (GreenPoints)
+# ──────────────────────────────────────────────
+
+class RewardViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = RewardSerializer
+    permission_classes = [IsParent]
+    pagination_class = StandardPagination
+
+    def get_queryset(self):
+        return Reward.objects.filter(is_active=True)
+
+    @action(detail=True, methods=['post'])
+    def redeem(self, request, pk=None):
+        import secrets
+        from django.db import transaction
+
+        reward = self.get_object()
+        child_id = request.data.get('child_id')
+        try:
+            child = ChildProfile.objects.get(id=child_id, parent=request.user)
+        except ChildProfile.DoesNotExist:
+            return Response({'detail': 'Ребёнок не найден.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if reward.stock is not None and reward.stock <= 0:
+            return Response({'detail': 'Эта награда закончилась.'}, status=status.HTTP_400_BAD_REQUEST)
+        if child.points_balance < reward.cost_points:
+            return Response(
+                {'detail': f'Недостаточно GreenPoints: нужно {reward.cost_points}, доступно {child.points_balance}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            child.spent_points += reward.cost_points
+            child.save(update_fields=['spent_points'])
+            if reward.stock is not None:
+                reward.stock -= 1
+                reward.save(update_fields=['stock'])
+            redemption = RewardRedemption.objects.create(
+                child=child,
+                reward=reward,
+                parent=request.user,
+                points_spent=reward.cost_points,
+                code=f'GL-{secrets.token_hex(4).upper()}',
+            )
+
+        logger.info('redeem: child=%s reward=%s code=%s', child.name, reward.title, redemption.code)
+        return Response(RewardRedemptionSerializer(redemption).data, status=status.HTTP_201_CREATED)
+
+
+class RedemptionListView(generics.ListAPIView):
+    serializer_class = RewardRedemptionSerializer
+    permission_classes = [IsParent]
+    pagination_class = StandardPagination
+
+    def get_queryset(self):
+        qs = RewardRedemption.objects.filter(parent=self.request.user).select_related('reward', 'child')
+        child_id = self.request.query_params.get('child_id')
+        if child_id:
+            qs = qs.filter(child_id=child_id)
+        return qs
+
+
+# ──────────────────────────────────────────────
+# Голосовой дневник
+# ──────────────────────────────────────────────
+
+class VoiceDiaryView(APIView):
+    permission_classes = [IsParent]
+
+    def get(self, request):
+        qs = VoiceDiaryEntry.objects.filter(parent=request.user).select_related('child')
+        child_id = request.query_params.get('child_id')
+        if child_id:
+            qs = qs.filter(child_id=child_id)
+        entries = qs[:50]
+        return Response(VoiceDiaryEntrySerializer(entries, many=True).data)
+
+    def post(self, request):
+        text = (request.data.get('text') or '').strip()
+        if not text:
+            return Response({'detail': 'Запись не может быть пустой.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        child_id = request.data.get('child_id') or request.data.get('child')
+        try:
+            child = ChildProfile.objects.get(id=child_id, parent=request.user)
+        except (ChildProfile.DoesNotExist, ValueError, TypeError):
+            return Response({'detail': 'Ребёнок не найден.'}, status=status.HTTP_404_NOT_FOUND)
+
+        ai_feedback = analyze_diary_entry(text, child)
+        entry = VoiceDiaryEntry.objects.create(
+            parent=request.user,
+            child=child,
+            text=text,
+            word_count=len(text.split()),
+            ai_feedback=ai_feedback,
+        )
+        return Response(VoiceDiaryEntrySerializer(entry).data, status=status.HTTP_201_CREATED)
+
+
+# ──────────────────────────────────────────────
+# Eco Passport и сертификаты
+# ──────────────────────────────────────────────
+
+class EcoPassportView(APIView):
+    permission_classes = [IsParent]
+
+    def get(self, request, child_id):
+        try:
+            child = ChildProfile.objects.get(id=child_id, parent=request.user)
+        except ChildProfile.DoesNotExist:
+            return Response({'detail': 'Ребёнок не найден.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Выдать новые сертификаты, если достигнуты пороги
+        check_and_issue_certificates(child)
+
+        approved_qs = MissionSubmission.objects.filter(
+            child=child, status=MissionSubmission.Status.APPROVED
+        )
+        by_category = (
+            approved_qs.values('mission__category__name')
+            .annotate(count=Count('id'))
+            .order_by('-count')
+        )
+        certificates = Certificate.objects.filter(child=child)
+        persona = get_persona(child)
+
+        return Response({
+            'child': ChildProfileSerializer(child, context={'request': request}).data,
+            'persona': {'key': persona['key'], 'name': persona['name']},
+            'approved_missions': approved_qs.count(),
+            'total_points': child.total_points,
+            'points_balance': child.points_balance,
+            'streak_days': child.streak_days,
+            'achievements_count': ChildAchievement.objects.filter(child=child).count(),
+            'diary_entries_count': VoiceDiaryEntry.objects.filter(child=child).count(),
+            'by_category': {
+                (row['mission__category__name'] or 'Без категории'): row['count']
+                for row in by_category
+            },
+            'certificates': CertificateSerializer(certificates, many=True).data,
+        })
+
+
+class CertificatePDFView(APIView):
+    permission_classes = [IsParent]
+
+    def get(self, request, pk):
+        from django.http import HttpResponse
+
+        try:
+            certificate = Certificate.objects.select_related('child').get(
+                pk=pk, child__parent=request.user
+            )
+        except Certificate.DoesNotExist:
+            return Response({'detail': 'Сертификат не найден.'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            from .services.certificate_pdf import generate_certificate_pdf
+            pdf_bytes = generate_certificate_pdf(certificate)
+        except ImportError:
+            return Response(
+                {'detail': 'Генерация PDF недоступна: не установлен reportlab.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        response = HttpResponse(pdf_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = (
+            f'attachment; filename="certificate-{certificate.code}-{certificate.id}.pdf"'
+        )
+        return response
 
 
 # ──────────────────────────────────────────────

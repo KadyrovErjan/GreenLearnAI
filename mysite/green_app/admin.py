@@ -4,7 +4,8 @@ from django.contrib.auth.admin import UserAdmin
 
 from .models import (
     UserProfile, ChildProfile, MissionCategory, Mission,
-    MissionSubmission, Achievement, ChildAchievement, AIChatMessage
+    MissionSubmission, Achievement, ChildAchievement, AIChatMessage,
+    Reward, RewardRedemption, VoiceDiaryEntry, Certificate
 )
 
 
@@ -65,3 +66,32 @@ class AIChatMessageAdmin(admin.ModelAdmin):
     list_display = ('parent', 'child', 'role', 'created_at')
     list_filter = ('role',)
     search_fields = ('parent__email', 'message')
+
+
+@admin.register(Reward)
+class RewardAdmin(admin.ModelAdmin):
+    list_display = ('title', 'partner', 'cost_points', 'stock', 'is_active')
+    list_filter = ('is_active', 'partner')
+    search_fields = ('title', 'partner')
+    list_editable = ('is_active',)
+
+
+@admin.register(RewardRedemption)
+class RewardRedemptionAdmin(admin.ModelAdmin):
+    list_display = ('child', 'reward', 'points_spent', 'code', 'created_at')
+    search_fields = ('child__name', 'reward__title', 'code')
+    readonly_fields = ('created_at',)
+
+
+@admin.register(VoiceDiaryEntry)
+class VoiceDiaryEntryAdmin(admin.ModelAdmin):
+    list_display = ('child', 'word_count', 'created_at')
+    search_fields = ('child__name', 'text')
+    readonly_fields = ('created_at',)
+
+
+@admin.register(Certificate)
+class CertificateAdmin(admin.ModelAdmin):
+    list_display = ('child', 'title', 'code', 'issued_at')
+    list_filter = ('code',)
+    search_fields = ('child__name', 'title')

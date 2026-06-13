@@ -3,7 +3,8 @@ from rest_framework import serializers
 from django.db.models import Sum
 from .models import (
     UserProfile, ChildProfile, MissionCategory, Mission,
-    MissionSubmission, Achievement, ChildAchievement, AIChatMessage
+    MissionSubmission, Achievement, ChildAchievement, AIChatMessage,
+    Reward, RewardRedemption, VoiceDiaryEntry, Certificate
 )
 
 
@@ -39,13 +40,19 @@ class RegisterSerializer(serializers.ModelSerializer):
 class ChildProfileSerializer(serializers.ModelSerializer):
     parent = serializers.HiddenField(default=serializers.CurrentUserDefault())
 
+    points_balance = serializers.IntegerField(read_only=True)
+
     class Meta:
         model = ChildProfile
         fields = (
             'id', 'parent', 'name', 'age', 'avatar',
-            'total_points', 'level', 'streak_days', 'created_at'
+            'total_points', 'spent_points', 'points_balance',
+            'level', 'streak_days', 'created_at'
         )
-        read_only_fields = ('id', 'total_points', 'level', 'streak_days', 'created_at')
+        read_only_fields = (
+            'id', 'total_points', 'spent_points', 'points_balance',
+            'level', 'streak_days', 'created_at'
+        )
 
 
 class MissionCategorySerializer(serializers.ModelSerializer):
@@ -103,6 +110,41 @@ class AIChatMessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = AIChatMessage
         fields = ('id', 'role', 'message', 'created_at')
+
+
+class RewardSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Reward
+        fields = (
+            'id', 'title', 'description', 'partner', 'icon',
+            'cost_points', 'stock', 'is_active'
+        )
+
+
+class RewardRedemptionSerializer(serializers.ModelSerializer):
+    reward = RewardSerializer(read_only=True)
+    child_name = serializers.CharField(source='child.name', read_only=True)
+
+    class Meta:
+        model = RewardRedemption
+        fields = ('id', 'child', 'child_name', 'reward', 'points_spent', 'code', 'created_at')
+
+
+class VoiceDiaryEntrySerializer(serializers.ModelSerializer):
+    child_name = serializers.CharField(source='child.name', read_only=True)
+
+    class Meta:
+        model = VoiceDiaryEntry
+        fields = ('id', 'child', 'child_name', 'text', 'word_count', 'ai_feedback', 'created_at')
+        read_only_fields = ('id', 'word_count', 'ai_feedback', 'created_at')
+
+
+class CertificateSerializer(serializers.ModelSerializer):
+    child_name = serializers.CharField(source='child.name', read_only=True)
+
+    class Meta:
+        model = Certificate
+        fields = ('id', 'child', 'child_name', 'code', 'title', 'description', 'icon', 'issued_at')
 
 
 # ──────────────────────────────────────────────

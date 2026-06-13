@@ -38,11 +38,12 @@ class ChildProfile(models.Model):
     )
     name = models.CharField(max_length=100, verbose_name='Имя')
     age = models.PositiveSmallIntegerField(
-        validators=[MinValueValidator(2), MaxValueValidator(10)],
+        validators=[MinValueValidator(2), MaxValueValidator(17)],
         verbose_name='Возраст'
     )
     avatar = models.ImageField(upload_to='children/', null=True, blank=True, verbose_name='Аватар')
     total_points = models.PositiveIntegerField(default=0, verbose_name='Всего баллов')
+    spent_points = models.PositiveIntegerField(default=0, verbose_name='Потрачено баллов')
     level = models.PositiveSmallIntegerField(default=1, verbose_name='Уровень')
     streak_days = models.PositiveSmallIntegerField(default=0, verbose_name='Серия дней')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создан')
@@ -50,6 +51,11 @@ class ChildProfile(models.Model):
     class Meta:
         verbose_name = 'Профиль ребёнка'
         verbose_name_plural = 'Профили детей'
+
+    @property
+    def points_balance(self) -> int:
+        """Доступные GreenPoints (заработано минус потрачено)."""
+        return max(self.total_points - self.spent_points, 0)
 
     def __str__(self):
         return f'{self.name} (возраст {self.age}, уровень {self.level})'
@@ -89,11 +95,11 @@ class Mission(models.Model):
         max_length=10, choices=Difficulty.choices, default=Difficulty.EASY, verbose_name='Сложность'
     )
     min_age = models.PositiveSmallIntegerField(
-        default=2, validators=[MinValueValidator(2), MaxValueValidator(10)],
+        default=2, validators=[MinValueValidator(2), MaxValueValidator(17)],
         verbose_name='Минимальный возраст'
     )
     max_age = models.PositiveSmallIntegerField(
-        default=10, validators=[MinValueValidator(2), MaxValueValidator(10)],
+        default=10, validators=[MinValueValidator(2), MaxValueValidator(17)],
         verbose_name='Максимальный возраст'
     )
     is_active = models.BooleanField(default=True, verbose_name='Активно')
@@ -218,3 +224,98 @@ class AIChatMessage(models.Model):
 
     def __str__(self):
         return f'{self.parent.email} [{self.role}] {self.created_at:%Y-%m-%d %H:%M}'
+
+
+class Reward(models.Model):
+    """Награда в магазине GreenPoints (купон партнёра, билет, книга и т.д.)"""
+    title = models.CharField(max_length=200, verbose_name='Название')
+    description = models.TextField(blank=True, verbose_name='Описание')
+    partner = models.CharField(max_length=100, blank=True, verbose_name='Партнёр')
+    icon = models.CharField(max_length=20, blank=True, verbose_name='Иконка (эмодзи)')
+    cost_points = models.PositiveIntegerField(verbose_name='Стоимость в GreenPoints')
+    stock = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name='Остаток (пусто = безлимит)'
+    )
+    is_active = models.BooleanField(default=True, verbose_name='Активна')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создана')
+
+    class Meta:
+        verbose_name = 'Награда'
+        verbose_name_plural = 'Награды'
+        ordering = ['cost_points']
+
+    def __str__(self):
+        return f'{self.title} ({self.cost_points} GP)'
+
+
+class RewardRedemption(models.Model):
+    """Обмен GreenPoints на награду"""
+    child = models.ForeignKey(
+        ChildProfile, on_delete=models.CASCADE,
+        related_name='redemptions', verbose_name='Ребёнок'
+    )
+    reward = models.ForeignKey(
+        Reward, on_delete=models.PROTECT,
+        related_name='redemptions', verbose_name='Награда'
+    )
+    parent = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE,
+        related_name='redemptions', verbose_name='Родитель'
+    )
+    points_spent = models.PositiveIntegerField(verbose_name='Списано баллов')
+    code = models.CharField(max_length=20, unique=True, verbose_name='Код купона')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создан')
+
+    class Meta:
+        verbose_name = 'Обмен награды'
+        verbose_name_plural = 'Обмены наград'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.child.name} — {self.reward.title} [{self.code}]'
+
+
+class VoiceDiaryEntry(models.Model):
+    """Запись голосового дневника ребёнка"""
+    parent = models.ForeignKey(
+        UserProfile, on_delete=models.CASCADE,
+        related_name='diary_entries', verbose_name='Родитель'
+    )
+    child = models.ForeignKey(
+        ChildProfile, on_delete=models.CASCADE,
+        related_name='diary_entries', verbose_name='Ребёнок'
+    )
+    text = models.TextField(verbose_name='Текст записи')
+    word_count = models.PositiveIntegerField(default=0, verbose_name='Кол-во слов')
+    ai_feedback = models.TextField(blank=True, verbose_name='Отзыв AI')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Создана')
+
+    class Meta:
+        verbose_name = 'Запись дневника'
+        verbose_name_plural = 'Записи дневника'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.child.name} — дневник {self.created_at:%Y-%m-%d}'
+
+
+class Certificate(models.Model):
+    """Именной сертификат ребёнка за большие миссии"""
+    child = models.ForeignKey(
+        ChildProfile, on_delete=models.CASCADE,
+        related_name='certificates', verbose_name='Ребёнок'
+    )
+    code = models.SlugField(max_length=50, verbose_name='Код сертификата')
+    title = models.CharField(max_length=200, verbose_name='Название')
+    description = models.TextField(blank=True, verbose_name='Описание')
+    icon = models.CharField(max_length=20, blank=True, verbose_name='Иконка (эмодзи)')
+    issued_at = models.DateTimeField(auto_now_add=True, verbose_name='Выдан')
+
+    class Meta:
+        unique_together = ('child', 'code')
+        verbose_name = 'Сертификат'
+        verbose_name_plural = 'Сертификаты'
+        ordering = ['-issued_at']
+
+    def __str__(self):
+        return f'{self.child.name} — {self.title}'
